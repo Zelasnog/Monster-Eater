@@ -9,6 +9,8 @@ print(string.format("[ClientInit] Cliente inicializado | %s v%s", GameConfig.Nam
 local controllersFolder = script.Parent:WaitForChild("Controllers")
 local MovementController = require(controllersFolder:WaitForChild("MovementController"))
 MovementController.Init()
+local SprintAnimationController = require(controllersFolder:WaitForChild("SprintAnimationController"))
+SprintAnimationController.Init()
 local ShiftLockController = require(controllersFolder:WaitForChild("ShiftLockController"))
 ShiftLockController.Init()
 local CombatController = require(controllersFolder:WaitForChild("CombatController"))

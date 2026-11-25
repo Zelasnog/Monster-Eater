@@ -19,59 +19,6 @@ local requestedSprint = false
 local dashRequested = false
 local slideRequested = false
 local climbKeys = { W = false, A = false, S = false, D = false }
-local suppressedCharacter = nil
-local suppressedAnimate = nil
-local animateWasDisabled = nil
-
-local function setDashAnimationSuppressed(character, suppressed)
-	if suppressed then
-		if not character or suppressedCharacter == character then
-			return
-		end
-		suppressedCharacter = character
-		local animateScript = character:FindFirstChild("Animate")
-		if animateScript and (animateScript:IsA("LocalScript") or animateScript:IsA("Script")) then
-			suppressedAnimate = animateScript
-			animateWasDisabled = animateScript.Disabled
-			animateScript.Disabled = true
-		end
-
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
-		if animator then
-			for _, track in animator:GetPlayingAnimationTracks() do
-				local trackName = string.lower(track.Name)
-				if track.Priority == Enum.AnimationPriority.Movement
-					or string.find(trackName, "run", 1, true)
-					or string.find(trackName, "walk", 1, true)
-				then
-					track:Stop(0.06)
-				end
-			end
-		end
-	elseif suppressedCharacter then
-		if suppressedAnimate and suppressedAnimate.Parent then
-			suppressedAnimate.Disabled = animateWasDisabled
-		end
-		suppressedCharacter = nil
-		suppressedAnimate = nil
-		animateWasDisabled = nil
-	end
-end
-
-local function updateDashPresentation()
-	if player:GetAttribute("MovementDashing") == true
-		or player:GetAttribute("MovementSliding") == true
-		or player:GetAttribute("MovementWallrunning") == true
-		or player:GetAttribute("MovementClimbing") == true
-		or player:GetAttribute("MovementMantling") == true
-	then
-		setDashAnimationSuppressed(player.Character, true)
-	else
-		setDashAnimationSuppressed(nil, false)
-	end
-end
-
 local function sendClimbDirection()
 	if player:GetAttribute("MovementClimbing") ~= true then return end
 	local x = (climbKeys.D and 1 or 0) - (climbKeys.A and 1 or 0)
@@ -186,14 +133,10 @@ function MovementController.Init()
 	ContextActionService:BindActionAtPriority(WALLJUMP_ACTION_NAME, handleWallJump, false, 3000, Enum.KeyCode.Space)
 	ContextActionService:BindAction(CLIMB_ACTION_NAME, handleClimbToggle, false, Enum.KeyCode.E)
 	ContextActionService:BindActionAtPriority(CLIMBBOOST_ACTION_NAME, handleClimbBoost, false, 3000, Enum.KeyCode.Space)
-	player:GetAttributeChangedSignal("MovementDashing"):Connect(updateDashPresentation)
-	player:GetAttributeChangedSignal("MovementSliding"):Connect(updateDashPresentation)
-	player:GetAttributeChangedSignal("MovementWallrunning"):Connect(updateDashPresentation)
+	-- SprintAnimationController owns locomotion and server-confirmed Dash presentation.
 	player:GetAttributeChangedSignal("MovementClimbing"):Connect(function()
-		updateDashPresentation()
 		sendClimbDirection()
 	end)
-	player:GetAttributeChangedSignal("MovementMantling"):Connect(updateDashPresentation)
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		local key = climbKeyMap[input.KeyCode]
 		if key and not gameProcessed then
@@ -212,7 +155,6 @@ function MovementController.Init()
 		dashRequested = false
 		slideRequested = false
 		for key in climbKeys do climbKeys[key] = false end
-		updateDashPresentation()
 		if requestedSprint then
 			requestedSprint = false
 			sprintRemote:FireServer(false)
@@ -222,7 +164,6 @@ function MovementController.Init()
 		dashRequested = false
 		slideRequested = false
 		for key in climbKeys do climbKeys[key] = false end
-		setDashAnimationSuppressed(nil, false)
 		if requestedSprint then
 			requestedSprint = false
 			sprintRemote:FireServer(false)

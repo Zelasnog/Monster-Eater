@@ -1,0 +1,202 @@
+-- Local Roblox Studio plugin for importing this project's generated R6 .rbxmx
+-- KeyframeSequence files. It intentionally accepts only the converter's
+-- restricted XML vocabulary and never executes file contents.
+
+local StudioService = game:GetService("StudioService")
+local Selection = game:GetService("Selection")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local toolbar = plugin:CreateToolbar("R6 Animations")
+local importButton = toolbar:CreateButton(
+	"ImportKeyframeSequence",
+	"Import one or more generated R6 KeyframeSequences (.rbxmx)",
+	""
+)
+
+local function decodeEntities(value)
+	return (value:gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&lt;", "<")
+		:gsub("&gt;", ">"):gsub("&amp;", "&"))
+end
+
+local function parseXml(xml)
+	local root = { tag = "#document", children = {} }
+	local stack = { root }
+	for token in xml:gmatch("<[^>]+>[^<]*") do
+		local tag = token:match("^<([%w_:]+)")
+		if token:match("^<%?") or token:match("^<!") then
+			continue
+		elseif token:match("^</") then
+			assert(#stack > 1 and stack[#stack].tag == token:match("^</([%w_:]+)"), "Malformed XML nesting")
+			table.remove(stack)
+		else
+			assert(tag, "Invalid XML tag")
+			local node = { tag = tag, attrs = {}, children = {}, text = "" }
+			for key, value in token:gmatch('([%w_:]+)="(.-)"') do
+				node.attrs[key] = decodeEntities(value)
+			end
+			local body = token:match(">([^<]*)$")
+			if body then node.text = decodeEntities(body) end
+			table.insert(stack[#stack].children, node)
+			if not token:match("/>") then table.insert(stack, node) end
+		end
+	end
+	assert(#stack == 1, "Unclosed XML element")
+	return root
+end
+
+local function child(node, tag)
+	for _, item in ipairs(node.children) do
+		if item.tag == tag then return item end
+	end
+	return nil
+end
+
+local function children(node, tag)
+	local result = {}
+	for _, item in ipairs(node.children) do
+		if item.tag == tag then table.insert(result, item) end
+	end
+	return result
+end
+
+local function properties(itemNode)
+	local result = {}
+	local props = child(itemNode, "Properties")
+	assert(props, "Missing Properties block")
+	for _, propNode in ipairs(props.children) do
+		local name = propNode.attrs.name
+		if name then result[name] = propNode end
+	end
+	return result
+end
+
+local function propText(props, name, default)
+	local node = props[name]
+	if not node then return default end
+	return node.text
+end
+
+local function enumValue(enumType, number)
+	local names = {
+		PoseEasingStyle = { "Linear", "Constant", "Elastic", "Cubic", "Bounce", "CubicV2", "ConstantV2", "LinearV2" },
+		PoseEasingDirection = { "In", "Out", "InOut" },
+		AnimationPriority = { "Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4" },
+	}
+	local valueName = assert(names[enumType] and names[enumType][number + 1], "Unsupported " .. enumType .. " enum value: " .. tostring(number))
+	return Enum[enumType][valueName]
+end
+
+local function readCFrame(node)
+	local values = {}
+	for _, axis in ipairs({ "X", "Y", "Z", "R00", "R01", "R02", "R10", "R11", "R12", "R20", "R21", "R22" }) do
+		values[axis] = tonumber(child(node, axis) and child(node, axis).text)
+		assert(values[axis] and values[axis] == values[axis], "Invalid CFrame component " .. axis)
+	end
+	return CFrame.new(values.X, values.Y, values.Z,
+		values.R00, values.R01, values.R02,
+		values.R10, values.R11, values.R12,
+		values.R20, values.R21, values.R22)
+end
+
+local function buildPose(poseNode)
+	assert(poseNode.attrs.class == "Pose", "Only Pose instances are accepted")
+	local props = properties(poseNode)
+	local pose = Instance.new("Pose")
+	pose.Name = propText(props, "Name", "")
+	pose.Weight = tonumber(propText(props, "Weight", "1"))
+	assert(pose.Weight, "Invalid Pose.Weight")
+	local cf = props.CFrame
+	assert(cf, "Missing Pose.CFrame")
+	pose.CFrame = readCFrame(cf)
+	pose.EasingStyle = enumValue("PoseEasingStyle", tonumber(propText(props, "EasingStyle", "0")))
+	pose.EasingDirection = enumValue("PoseEasingDirection", tonumber(propText(props, "EasingDirection", "1")))
+	for _, subPoseNode in ipairs(children(poseNode, "Item")) do
+		pose:AddSubPose(buildPose(subPoseNode))
+	end
+	return pose
+end
+
+local function buildSequence(xml)
+	assert(not xml:lower():find("<!doctype", 1, true), "DOCTYPE is not allowed")
+	assert(not xml:lower():find("<!entity", 1, true), "XML entities are not allowed")
+	local document = parseXml(xml)
+	local roblox = child(document, "roblox")
+	assert(roblox, "Not a Roblox XML model")
+	local seqNode
+	for _, itemNode in ipairs(children(roblox, "Item")) do
+		if itemNode.attrs.class == "KeyframeSequence" then
+			assert(not seqNode, "File contains multiple root KeyframeSequences")
+			seqNode = itemNode
+		end
+	end
+	assert(seqNode, "No KeyframeSequence found")
+	local props = properties(seqNode)
+	local sequence = Instance.new("KeyframeSequence")
+	sequence.Name = propText(props, "Name", "ImportedKeyframeSequence")
+	sequence.Loop = propText(props, "Loop", "false") == "true"
+	sequence.Priority = enumValue("AnimationPriority", tonumber(propText(props, "Priority", "2")))
+	for _, frameNode in ipairs(children(seqNode, "Item")) do
+		assert(frameNode.attrs.class == "Keyframe", "Unexpected child of KeyframeSequence")
+		local frameProps = properties(frameNode)
+		local frame = Instance.new("Keyframe")
+		frame.Name = propText(frameProps, "Name", "")
+		frame.Time = tonumber(propText(frameProps, "Time", ""))
+		assert(frame.Time and frame.Time >= 0, "Invalid Keyframe.Time")
+		for _, poseNode in ipairs(children(frameNode, "Item")) do
+			frame:AddPose(buildPose(poseNode))
+		end
+		sequence:AddKeyframe(frame)
+	end
+	assert(#sequence:GetKeyframes() > 0, "Sequence has no keyframes")
+	return sequence
+end
+
+local function findR6Rig()
+	local rig = workspace:FindFirstChild("Rig")
+	if not (rig and rig:IsA("Model")) then return nil end
+	local humanoid = rig:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.RigType ~= Enum.HumanoidRigType.R6 then return nil end
+	return rig
+end
+
+importButton.Click:Connect(function()
+	local ok, result = pcall(function()
+		local rig = findR6Rig()
+		assert(rig, 'No se encontró Workspace.Rig con Humanoid R6.')
+		local files = StudioService:PromptImportFilesAsync({ "rbxmx" })
+		if not files or #files == 0 then return "Importación cancelada." end
+
+		local sequences = {}
+		local names = {}
+		for _, file in ipairs(files) do
+			local sequence = buildSequence(file:GetBinaryContents())
+			assert(not workspace:FindFirstChild(sequence.Name), "Ya existe una instancia en Workspace llamada " .. sequence.Name)
+			assert(not names[sequence.Name], "La selección contiene más de una secuencia llamada " .. sequence.Name)
+			names[sequence.Name] = true
+			sequence:SetAttribute("ImportedForRig", rig:GetFullName())
+			table.insert(sequences, sequence)
+		end
+
+		local selection = {}
+		local summaries = {}
+		for _, sequence in ipairs(sequences) do
+			sequence.Parent = workspace
+			table.insert(selection, sequence)
+			table.insert(summaries, string.format(
+				"%s: %d keyframes, %.3f s",
+				sequence.Name,
+				#sequence:GetKeyframes(),
+				sequence.Length
+			))
+		end
+		table.insert(selection, rig)
+		Selection:Set(selection)
+		return string.format("Importadas %d secuencias: %s. Rig: %s.", #sequences, table.concat(summaries, "; "), rig.Name)
+	end)
+	if ok then
+		if result ~= "Importación cancelada." then ChangeHistoryService:SetWaypoint("Import KeyframeSequence") end
+		print("[R6 Animation Importer] " .. result)
+	else
+		warn("[R6 Animation Importer] Error: " .. tostring(result))
+	end
+end)
